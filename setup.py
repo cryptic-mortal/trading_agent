@@ -17,6 +17,8 @@ setup(
     "yfinance>=0.2.37",
     "typer>=0.9.0",
     "rich>=13.0.0",
+    "openai>=1.40.0",
+    "google-generativeai>=0.7.0",
     ],
     python_requires=">=3.10",
     entry_points={

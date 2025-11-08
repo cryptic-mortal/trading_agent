@@ -15,6 +15,8 @@ import xml.etree.ElementTree as ET
 
 import yfinance as yf
 
+from tradingagents import llm_client
+
 _POSITIVE_TERMS = {
     "beat",
     "beats",
@@ -88,6 +90,7 @@ class NewsWeightReport:
     judgement: str
     points: List[str]
     articles: List[NewsArticle]
+    generated_via_llm: bool = False
 
     def to_markdown(self, include_articles: bool = True) -> str:
         header = (
@@ -120,6 +123,8 @@ class NewsWeightReviewAgent:
         as_of: Optional[str] = None,
         lookback_days: int = 7,
         max_articles: int = 8,
+        use_llm: bool = False,
+        llm_model: Optional[str] = None,
     ) -> NewsWeightReport:
         clean_ticker = ticker.strip().upper()
         if not clean_ticker:
@@ -141,6 +146,26 @@ class NewsWeightReviewAgent:
         judgement, supporting_points = self._build_opinion(weight, articles)
         points = [judgement] + supporting_points
         points = points[:4]
+        generated_via_llm = False
+
+        if use_llm:
+            article_summaries = _articles_prompt_digest(articles)
+            net_sentiment = sum(article.sentiment_score for article in articles)
+            llm_points = llm_client.summarise_news(
+                ticker=clean_ticker,
+                weight=weight,
+                as_of=as_of_date.isoformat(),
+                lookback_days=lookback_days,
+                article_summaries=article_summaries,
+                net_sentiment=net_sentiment,
+                max_points=4,
+                model=llm_model,
+            )
+            if llm_points:
+                points = llm_points[:4]
+                if points:
+                    judgement = points[0]
+                generated_via_llm = True
 
         return NewsWeightReport(
             ticker=clean_ticker,
@@ -150,6 +175,7 @@ class NewsWeightReviewAgent:
             judgement=judgement,
             points=points,
             articles=articles,
+            generated_via_llm=generated_via_llm,
         )
 
     def _resolve_date(self, as_of: Optional[str]) -> date:
@@ -335,6 +361,19 @@ def _coverage_summary(pos_count: int, neg_count: int, total: int) -> str:
     return (
         f"News tone snapshot: {pos_count} positive, {neg_count} negative, {neutral_count} neutral items in the sample."
     )
+
+
+def _articles_prompt_digest(articles: List[NewsArticle]) -> str:
+    lines: List[str] = []
+    for article in articles:
+        tone = article.sentiment
+        date_str = article.published_at or "recent"
+        source = article.source or "vendor"
+        summary = article.summary or "(no summary provided)"
+        lines.append(
+            f"- {tone.title()} | {source} | {date_str}: {article.headline} — {summary}"
+        )
+    return "\n".join(lines)
 
 
 def _compose_weight_statement(

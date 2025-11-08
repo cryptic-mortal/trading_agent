@@ -4,6 +4,7 @@ import typer
 from rich.console import Console
 from rich.markdown import Markdown
 
+from tradingagents import llm_client
 from tradingagents.combined_weight_agent import WeightSynthesisAgent
 from tradingagents.fundamental_agent import FundamentalWeightAgent
 from tradingagents.news_agent import NewsWeightReviewAgent
@@ -26,6 +27,15 @@ def weight(
         "--include-metrics/--no-metrics",
         help="Include the fundamentals metrics table.",
     ),
+    use_llm: bool = typer.Option(
+        False,
+        "--llm/--no-llm",
+        help="Ask an LLM to draft the fundamental rationale when an API key is configured.",
+    ),
+    llm_model: Optional[str] = typer.Option(
+        None,
+        help="Override the model name when --llm is enabled (defaults to TRADINGAGENTS_LLM_MODEL or gemini-2.0-flash).",
+    ),
     as_of: Optional[str] = typer.Option(
         None,
         help="Override the as-of date (YYYY-MM-DD).",
@@ -35,7 +45,13 @@ def weight(
 
     agent = FundamentalWeightAgent()
     try:
-        report = agent.generate_report(ticker, weight, as_of=as_of)
+        report = agent.generate_report(
+            ticker,
+            weight,
+            as_of=as_of,
+            use_llm=use_llm,
+            llm_model=llm_model,
+        )
     except ValueError as err:
         console.print(f"[red]{err}[/red]")
         raise typer.Exit(code=1) from err
@@ -44,6 +60,12 @@ def weight(
         raise typer.Exit(code=1) from err
 
     console.print(Markdown(report.to_markdown(include_metrics=include_metrics)))
+
+    if report.generated_via_llm:
+        console.print("\n[dim]Fundamental rationale generated via LLM.[/dim]")
+    elif use_llm:
+        reason = llm_client.LAST_LLM_ERROR or "LLM call returned no content."
+        console.print(f"\n[yellow]LLM path skipped: {reason}[/yellow]")
 
 
 @app.command()
@@ -56,6 +78,15 @@ def news_weight(
         True,
         "--include-articles/--no-articles",
         help="Include the headline table.",
+    ),
+    use_llm: bool = typer.Option(
+        False,
+        "--llm/--no-llm",
+        help="Ask an LLM to synthesise the news-based rationale when an API key is configured.",
+    ),
+    llm_model: Optional[str] = typer.Option(
+        None,
+        help="Override the model name when --llm is enabled (defaults to TRADINGAGENTS_LLM_MODEL or gemini-2.0-flash).",
     ),
     as_of: Optional[str] = typer.Option(
         None,
@@ -72,6 +103,8 @@ def news_weight(
             as_of=as_of,
             lookback_days=lookback_days,
             max_articles=max_articles,
+            use_llm=use_llm,
+            llm_model=llm_model,
         )
     except ValueError as err:
         console.print(f"[red]{err}[/red]")
@@ -81,6 +114,12 @@ def news_weight(
         raise typer.Exit(code=1) from err
 
     console.print(Markdown(report.to_markdown(include_articles=include_articles)))
+
+    if report.generated_via_llm:
+        console.print("\n[dim]News rationale generated via LLM.[/dim]")
+    elif use_llm:
+        reason = llm_client.LAST_LLM_ERROR or "LLM call returned no content."
+        console.print(f"\n[yellow]LLM path skipped: {reason}[/yellow]")
 
 
 @app.command()
@@ -102,6 +141,15 @@ def weight_summary(
         True,
         help="Include the headline table when components are shown.",
     ),
+    use_llm: bool = typer.Option(
+        False,
+        "--llm/--no-llm",
+        help="Ask an LLM (OpenAI Responses API) to draft the unified summary when an API key is available.",
+    ),
+    llm_model: Optional[str] = typer.Option(
+        None,
+        help="Override the model name when --llm is enabled (defaults to gpt-4o-mini).",
+    ),
     as_of: Optional[str] = typer.Option(
         None,
         help="Override the as-of date (YYYY-MM-DD).",
@@ -117,6 +165,8 @@ def weight_summary(
             as_of=as_of,
             lookback_days=lookback_days,
             max_articles=max_articles,
+            use_llm=use_llm,
+            llm_model=llm_model,
         )
     except ValueError as err:
         console.print(f"[red]{err}[/red]")
@@ -134,6 +184,12 @@ def weight_summary(
             )
         )
     )
+
+    if report.generated_via_llm:
+        console.print("\n[dim]Unified summary generated via LLM.[/dim]")
+    elif use_llm:
+        reason = llm_client.LAST_LLM_ERROR or "LLM call returned no content."
+        console.print(f"\n[yellow]LLM path skipped: {reason}[/yellow]")
 
 
 if __name__ == "__main__":

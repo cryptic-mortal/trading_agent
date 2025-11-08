@@ -6,6 +6,24 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yfinance as yf  # type: ignore[import]
 
+from tradingagents import llm_client
+
+_METRIC_FIELDS = [
+    ("revenue", "Total Revenue", "currency"),
+    ("net_income", "Net Income", "currency"),
+    ("operating_income", "Operating Income", "currency"),
+    ("operating_cash_flow", "Operating Cash Flow", "currency"),
+    ("gross_profit", "Gross Profit", "currency"),
+    ("equity", "Stockholder Equity", "currency"),
+    ("liabilities", "Total Liabilities", "currency"),
+    ("profit_margin", "Profit Margin", "percent"),
+    ("roe", "Return on Equity", "percent"),
+    ("revenue_growth", "Revenue Growth", "percent"),
+    ("pe_ratio", "Price/Earnings", "multiple"),
+    ("debt_to_equity", "Debt/Equity", "multiple"),
+    ("dividend_yield", "Dividend Yield", "percent"),
+]
+
 
 @dataclass
 class WeightReport:
@@ -16,6 +34,7 @@ class WeightReport:
     as_of: str
     rationale_points: List[str]
     metrics: Dict[str, Optional[float]]
+    generated_via_llm: bool = False
 
     def to_markdown(self, include_metrics: bool = True) -> str:
         header = (
@@ -50,6 +69,8 @@ class FundamentalWeightAgent:
         weight: float,
         *,
         as_of: Optional[str] = None,
+        use_llm: bool = False,
+        llm_model: Optional[str] = None,
     ) -> WeightReport:
         clean_ticker = ticker.strip().upper()
         if not clean_ticker:
@@ -61,6 +82,23 @@ class FundamentalWeightAgent:
         info, financials, balance_sheet, cashflow = self._fetch_fundamentals(clean_ticker)
         metrics = _calculate_metrics(info, financials, balance_sheet, cashflow)
         rationale = _build_rationale(clean_ticker, weight, metrics)
+        generated_via_llm = False
+
+        if use_llm:
+            metrics_table = _format_metrics_table(metrics)
+            metrics_summary = _metrics_prompt_summary(metrics)
+            llm_points = llm_client.summarise_fundamentals(
+                ticker=clean_ticker,
+                weight=weight,
+                as_of=as_of_str,
+                metrics_table=metrics_table,
+                metrics_summary=metrics_summary,
+                max_points=4,
+                model=llm_model,
+            )
+            if llm_points:
+                rationale = llm_points
+                generated_via_llm = True
 
         return WeightReport(
             ticker=clean_ticker,
@@ -68,6 +106,7 @@ class FundamentalWeightAgent:
             as_of=as_of_str,
             rationale_points=rationale,
             metrics=metrics,
+            generated_via_llm=generated_via_llm,
         )
 
     def _fetch_fundamentals(
@@ -355,25 +394,25 @@ def _metric_summary(metrics: Dict[str, Optional[float]]) -> str:
     return ", ".join(pieces)
 
 
-def _format_metrics_table(metrics: Dict[str, Optional[float]]) -> str:
-    order: List[Tuple[str, str, str]] = [
-        ("revenue", "Total Revenue", "currency"),
-        ("net_income", "Net Income", "currency"),
-        ("operating_income", "Operating Income", "currency"),
-        ("operating_cash_flow", "Operating Cash Flow", "currency"),
-        ("gross_profit", "Gross Profit", "currency"),
-        ("equity", "Stockholder Equity", "currency"),
-        ("liabilities", "Total Liabilities", "currency"),
-        ("profit_margin", "Profit Margin", "percent"),
-        ("roe", "Return on Equity", "percent"),
-        ("revenue_growth", "Revenue Growth", "percent"),
-        ("pe_ratio", "Price/Earnings", "multiple"),
-        ("debt_to_equity", "Debt/Equity", "multiple"),
-        ("dividend_yield", "Dividend Yield", "percent"),
-    ]
+def _metrics_prompt_summary(metrics: Dict[str, Optional[float]]) -> str:
+    lines: List[str] = []
+    for key, label, value_type in _METRIC_FIELDS:
+        value = metrics.get(key)
+        if value is None:
+            continue
+        if value_type == "currency":
+            formatted = _format_currency(value)
+        elif value_type == "percent":
+            formatted = f"{float(value):.2f}%"
+        else:
+            formatted = f"{float(value):.2f}"
+        lines.append(f"- {label}: {formatted}")
+    return "\n".join(lines)
 
+
+def _format_metrics_table(metrics: Dict[str, Optional[float]]) -> str:
     rows: List[str] = []
-    for key, label, value_type in order:
+    for key, label, value_type in _METRIC_FIELDS:
         value = metrics.get(key)
         if value is None:
             continue

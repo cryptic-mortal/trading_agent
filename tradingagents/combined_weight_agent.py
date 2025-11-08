@@ -9,6 +9,7 @@ from tradingagents.news_agent import (
 	NewsWeightReport,
 	NewsWeightReviewAgent,
 )
+from tradingagents.llm_client import summarise_weight_points
 
 
 @dataclass
@@ -20,6 +21,7 @@ class WeightSynthesisReport:
 	summary_points: List[str]
 	fundamental_report: WeightReport
 	news_report: NewsWeightReport
+	generated_via_llm: bool = False
 
 	def to_markdown(
 		self,
@@ -73,6 +75,8 @@ class WeightSynthesisAgent:
 		as_of: Optional[str] = None,
 		lookback_days: int = 7,
 		max_articles: int = 8,
+		use_llm: bool = False,
+		llm_model: Optional[str] = None,
 	) -> WeightSynthesisReport:
 		fund_report = self._fundamental_agent.generate_report(ticker, weight, as_of=as_of)
 		news_report = self._news_agent.generate_report(
@@ -84,6 +88,24 @@ class WeightSynthesisAgent:
 		)
 
 		summary_points = _synthesise_summary(fund_report, news_report)
+		used_llm = False
+		if use_llm:
+			fund_markdown = fund_report.to_markdown(include_metrics=True)
+			news_markdown = news_report.to_markdown(include_articles=True)
+			llm_points = summarise_weight_points(
+				ticker=fund_report.ticker,
+				weight=weight,
+				as_of=fund_report.as_of,
+				fundamental_points=fund_report.rationale_points,
+				news_points=news_report.points,
+				metrics_table=fund_markdown,
+				news_table=news_markdown,
+				max_points=len(summary_points) or 6,
+				model=llm_model,
+			)
+			if llm_points:
+				summary_points = llm_points
+				used_llm = True
 
 		return WeightSynthesisReport(
 			ticker=fund_report.ticker,
@@ -93,6 +115,7 @@ class WeightSynthesisAgent:
 			summary_points=summary_points,
 			fundamental_report=fund_report,
 			news_report=news_report,
+			generated_via_llm=used_llm,
 		)
 
 
