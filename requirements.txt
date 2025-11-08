@@ -4,3 +4,4 @@ typer>=0.9
 rich>=13
 openai>=1.40.0
 google-generativeai>=0.7.0
+vaderSentiment>=3.3.2

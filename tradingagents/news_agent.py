@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import re
 import contextlib
 import html
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -17,57 +17,13 @@ import yfinance as yf
 
 from tradingagents import llm_client
 
-_POSITIVE_TERMS = {
-    "beat",
-    "beats",
-    "growth",
-    "surge",
-    "surges",
-    "record",
-    "bullish",
-    "expansion",
-    "strong",
-    "outperform",
-    "outperformance",
-    "upgrade",
-    "upgrades",
-    "partnership",
-    "approval",
-    "profit",
-    "profits",
-    "profitability",
-    "guidance raise",
-    "exceeds",
-    "strategic",
-    "momentum",
-}
+try:
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+except ImportError:  # pragma: no cover - handled at runtime
+    SentimentIntensityAnalyzer = None  # type: ignore
 
-_NEGATIVE_TERMS = {
-    "lawsuit",
-    "lawsuits",
-    "probe",
-    "investigation",
-    "downgrade",
-    "downgrades",
-    "decline",
-    "declines",
-    "miss",
-    "misses",
-    "loss",
-    "losses",
-    "recall",
-    "cut",
-    "cuts",
-    "layoff",
-    "layoffs",
-    "slowdown",
-    "headwind",
-    "headwinds",
-    "concern",
-    "concerns",
-    "slump",
-    "slumps",
-}
+
+_SENTIMENT_ANALYSER = SentimentIntensityAnalyzer() if SentimentIntensityAnalyzer else None
 
 
 @dataclass
@@ -330,7 +286,7 @@ class NewsWeightReviewAgent:
         supporting.append(coverage_summary)
 
         for article in _top_articles(positives, negatives):
-            tone = "supportive" if article.sentiment_score > 0 else "cautionary"
+            tone = "positive" if article.sentiment_score > 0 else "negative"
             source = article.source or "vendor"
             date_str = article.published_at or "recent"
             supporting.append(
@@ -340,9 +296,9 @@ class NewsWeightReviewAgent:
                 break
 
         if len(supporting) < 3 and not negatives and positives:
-            supporting.append("Coverage skews upbeat with no material red flags flagged by vendors.")
+            supporting.append("Coverage skewed positive during the window with no negative headlines captured.")
         if len(supporting) < 3 and not positives and negatives:
-            supporting.append("Flow is dominated by risk-oriented stories; watch for escalation.")
+            supporting.append("Coverage skewed negative during the window with no offsetting positive headlines.")
 
         return judgement, supporting
 
@@ -380,40 +336,24 @@ def _compose_weight_statement(
     weight: float, net_score: int, pos_count: int, neg_count: int
 ) -> str:
     weight_pct = weight * 100.0
-    if net_score >= 2 and weight_pct < 8:
-        return (
-            f"Coverage skews constructive while the position sits at {weight_pct:.1f}% — consider whether the weight is too light relative to sentiment."
-        )
-    if net_score >= 2:
-        return (
-            f"Positive news flow backs the current {weight_pct:.1f}% allocation; staying the course is consistent with headlines."
-        )
-    if net_score <= -2 and weight_pct > 12:
-        return (
-            f"Risk-heavy coverage clashes with a {weight_pct:.1f}% stake — trim or hedge until the narrative stabilizes."
-        )
-    if net_score <= -2:
-        return (
-            f"Bearish news cadence argues for keeping exposure restrained at {weight_pct:.1f}% or lower."
-        )
-    if pos_count and neg_count:
-        return (
-            f"Mixed headlines (bulls vs bears split) suggest the {weight_pct:.1f}% weight is acceptable but needs monitoring."
-        )
     return (
-        f"Muted or neutral coverage leaves the {weight_pct:.1f}% allocation as a discretionary call pending clearer catalysts."
+        f"Headline sentiment score: {net_score} ({pos_count} positive / {neg_count} negative) alongside a {weight_pct:.1f}% allocation."
     )
 
 
 def _score_text(text: str) -> Tuple[str, int]:
-    lowered = text.lower()
-    pos_hits = sum(1 for term in _POSITIVE_TERMS if re.search(rf"\b{re.escape(term)}\b", lowered))
-    neg_hits = sum(1 for term in _NEGATIVE_TERMS if re.search(rf"\b{re.escape(term)}\b", lowered))
-    score = pos_hits - neg_hits
-    if score > 0:
-        return "positive", score
-    if score < 0:
-        return "negative", score
+    cleaned = text.strip()
+    if not cleaned:
+        return "neutral", 0
+
+    if _SENTIMENT_ANALYSER is None:
+        return "neutral", 0
+
+    compound = _SENTIMENT_ANALYSER.polarity_scores(cleaned)["compound"]
+    if compound >= 0.1:
+        return "positive", 1
+    if compound <= -0.1:
+        return "negative", -1
     return "neutral", 0
 
 

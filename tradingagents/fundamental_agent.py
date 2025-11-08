@@ -283,95 +283,55 @@ def _compute_growth(frame, label: str) -> Optional[float]:
 
 
 def _build_rationale(ticker: str, weight: float, metrics: Dict[str, Optional[float]]) -> List[str]:
-    positives: List[str] = []
-    negatives: List[str] = []
-    score = 0.0
+    rationale: List[str] = [
+        f"Current allocation for {ticker} stands at {weight:.2%}; below are the latest fundamentals pulled from Yahoo Finance."
+    ]
 
-    pe = metrics.get("pe_ratio")
-    if pe is not None:
-        if pe <= 18:
-            score += 1.5
-            positives.append(f"Valuation at {pe:.1f}× earnings leaves room for multiple expansion.")
-        elif pe >= 40:
-            score -= 1.5
-            negatives.append(f"Rich {pe:.1f}× P/E implies the weight leans on premium expectations.")
-
-    margin = metrics.get("profit_margin")
-    if margin is not None:
-        if margin >= 15:
-            score += 1.0
-            positives.append(f"Net margin of {margin:.1f}% underscores durable profitability.")
-        elif margin <= 5:
-            score -= 1.0
-            negatives.append(f"Margin at {margin:.1f}% compresses the earnings buffer behind the position.")
-
-    roe = metrics.get("roe")
-    if roe is not None:
-        if roe >= 18:
-            score += 1.0
-            positives.append(f"ROE of {roe:.1f}% signals efficient capital deployment.")
-        elif roe <= 8:
-            score -= 0.5
-            negatives.append(f"ROE of {roe:.1f}% trails quality benchmarks, moderating conviction.")
-
-    growth = metrics.get("revenue_growth")
-    if growth is not None:
-        if growth >= 20:
-            score += 1.0
-            positives.append(f"Revenue growth running {growth:.1f}% keeps the topline momentum supportive.")
-        elif growth <= 0:
-            score -= 1.0
-            negatives.append(f"Revenue growth at {growth:.1f}% points to a deceleration risk for sizing up.")
-
-    dte = metrics.get("debt_to_equity")
-    if dte is not None:
-        if dte <= 0.7:
-            score += 0.5
-            positives.append(f"Balance sheet leverage at {dte:.2f}× keeps downside risk manageable.")
-        elif dte >= 2.0:
-            score -= 1.0
-            negatives.append(f"Leverage of {dte:.2f}× nudges position sizing toward caution.")
-
-    dividend = metrics.get("dividend_yield")
-    if dividend is not None and dividend > 0:
-        if dividend >= 3.0:
-            positives.append(f"Dividend yield of {dividend:.1f}% provides a steady carry component.")
-        elif dividend < 1.0:
-            negatives.append(f"Token yield of {dividend:.1f}% keeps the case focused on growth delivery.")
-
-    rationale: List[str] = []
-    alignment = _alignment_statement(ticker, weight, score)
-    rationale.append(alignment)
-
-    ordered = positives + negatives if score >= 0 else negatives + positives
-    for point in ordered:
-        if len(rationale) >= 4:
-            break
-        rationale.append(point)
+    descriptive_points = _describe_metrics(metrics)
+    rationale.extend(descriptive_points)
 
     if len(rationale) < 4:
         summary = _metric_summary(metrics)
         if summary:
-            rationale.append(f"Key fundamentals in view: {summary}.")
+            rationale.append(f"Metrics snapshot: {summary}.")
 
     if len(rationale) < 3:
         rationale.append(
-            "Limited fundamentals were available via Yahoo Finance; hold sizing until more disclosures land."
+            "Some fundamentals were unavailable from Yahoo Finance; consider augmenting with additional disclosures."
         )
 
     return rationale[:4]
 
 
-def _alignment_statement(ticker: str, weight: float, score: float) -> str:
-    if score >= 2.5 and weight < 0.15:
-        return (
-            f"Fundamental scorecard tilts bullish, indicating capacity to scale beyond the current {weight:.2%} weight."
-        )
-    if score <= -1.5 and weight > 0.1:
-        return (
-            f"Fundamental mix lands light, so the {weight:.2%} allocation should stay capped pending stronger data."
-        )
-    return f"Assigned weight of {weight:.2%} aligns with the latest fundamental balance for {ticker}."
+def _describe_metrics(metrics: Dict[str, Optional[float]]) -> List[str]:
+    statements: List[str] = []
+
+    for key, label, value_type in _METRIC_FIELDS:
+        value = metrics.get(key)
+        if value is None:
+            continue
+        if value_type == "currency":
+            formatted = _format_currency(value)
+        elif value_type == "percent":
+            formatted = f"{float(value):.2f}%"
+        else:
+            formatted = f"{float(value):.2f}"
+
+        if key in {"revenue", "net_income", "operating_cash_flow", "gross_profit"}:
+            statements.append(f"Latest reported {label.lower()} came in at {formatted}.")
+        elif key in {"profit_margin", "roe", "revenue_growth", "dividend_yield"}:
+            statements.append(f"{label} registered at {formatted} in the most recent filings.")
+        elif key == "pe_ratio":
+            statements.append(f"Price-to-earnings multiple tracked at {formatted} on the trailing dataset.")
+        elif key == "debt_to_equity":
+            statements.append(f"Debt-to-equity ratio measured {formatted}, reflecting balance sheet leverage.")
+        else:
+            statements.append(f"{label} was reported at {formatted}.")
+
+        if len(statements) >= 3:
+            break
+
+    return statements
 
 
 def _metric_summary(metrics: Dict[str, Optional[float]]) -> str:

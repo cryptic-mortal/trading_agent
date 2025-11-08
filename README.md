@@ -6,8 +6,8 @@ This document explains how the trimmed TradingAgents codebase is organized after
 
 1. **CLI entrypoints (`cli/main.py`)** – Typer commands (`weight`, `news-weight`, `weight-summary`) orchestrate requests from the terminal. Each command accepts `--llm/--no-llm` and an optional `--llm-model` override. The CLI prints Rich-formatted Markdown and surfaces whether an LLM response was successfully used (or why it fell back).
 2. **Agents** – Lightweight classes under `tradingagents/` fetch data and produce structured reports:
-   - `fundamental_agent.py` pulls Yahoo Finance fundamentals and can let an LLM synthesise the rationale text.
-   - `news_agent.py` collects recent headlines (Google News RSS with yfinance fallback) and can hand those to an LLM for tone-aware guidance.
+   - `fundamental_agent.py` pulls Yahoo Finance fundamentals, renders neutral metric descriptions, and can let an LLM synthesise the rationale text.
+   - `news_agent.py` collects recent headlines (Google News RSS with yfinance fallback), applies VADER sentiment scoring (no keyword lists), and can hand those to an LLM for tone-aware guidance.
    - `combined_weight_agent.py` fuses both reports and optionally calls the LLM to write the unified bullets.
 3. **LLM bridge (`tradingagents/llm_client.py`)** – Central helper that routes prompts to OpenAI or Google Gemini based on the model name. It exposes convenience functions:
    - `summarise_fundamentals` – returns action-oriented bullets about fundamentals.
@@ -28,9 +28,9 @@ This document explains how the trimmed TradingAgents codebase is organized after
 | Module | Responsibility |
 | --- | --- |
 | `cli/main.py` | Typer CLI, Rich output, LLM status reporting. |
-| `tradingagents/fundamental_agent.py` | Pulls Yahoo Finance fundamentals, computes metrics, LLM-backed rationale. |
-| `tradingagents/news_agent.py` | Fetches and scores headlines, LLM-backed news summary. |
-| `tradingagents/combined_weight_agent.py` | Merges fundamentals & news into a single report, optional LLM synthesis. |
+| `tradingagents/fundamental_agent.py` | Pulls Yahoo Finance fundamentals, emits descriptive metric bullets, optional LLM rationale. |
+| `tradingagents/news_agent.py` | Fetches headlines, scores them with VADER, optional LLM news summary. |
+| `tradingagents/combined_weight_agent.py` | Merges fundamentals & news into one report, optional LLM synthesis. |
 | `tradingagents/llm_client.py` | Routes prompts to Gemini or OpenAI, normalises bullet output, tracks errors. |
 | `tradingagents/dataloader/` | Loads historical datasets for advanced scenarios. |
 | `tradingagents/model/`, `policy/`, `trainer/` | Reinforcement-learning experiments (not used by the CLI). |
@@ -42,7 +42,7 @@ This document explains how the trimmed TradingAgents codebase is organized after
   - Names starting with `gemini` or `flash-` invoke Google Gemini via `google-generativeai`.
   - Other names delegate to OpenAI’s Responses API.
 - Every agent method records whether the LLM path produced content. When it fails (missing API key, model error, empty response), the CLI prints a yellow message with `llm_client.LAST_LLM_ERROR` so you can troubleshoot quickly.
-- LLM helpers always fall back to deterministic heuristics when the call fails, preserving functionality without keys.
+- LLM helpers fall back to deterministic descriptions when a call fails, so the system still returns grounded output even without API keys.
 
 ## Typical Command Examples
 
@@ -61,7 +61,7 @@ python -m cli.main weight-summary AAPL 0.08 --llm
 
 - `llm_client.LAST_LLM_ERROR` stores the most recent provider error. The CLI prints it whenever an LLM call was requested but not used.
 - LLM prompts include the underlying tables and summaries, so the generated bullets remain grounded in the fetched data.
-- If you need to audit the deterministic fallbacks, inspect `_build_rationale` in `fundamental_agent.py` and `_build_opinion` in `news_agent.py`—they still govern behaviour when `use_llm=False` or when the LLM fails.
+- If you need to audit the deterministic fallbacks, inspect `_build_rationale` in `fundamental_agent.py` and `_build_opinion` in `news_agent.py`—they provide descriptive, data-backed summaries whenever `use_llm=False` or the LLM fails.
 
 ## Extending the System
 
