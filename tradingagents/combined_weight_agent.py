@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from tradingagents.fundamental_agent import FundamentalWeightAgent, WeightReport
-from tradingagents.news_weight_agent import (
+from tradingagents.news_agent import (
 	NewsArticle,
 	NewsWeightReport,
 	NewsWeightReviewAgent,

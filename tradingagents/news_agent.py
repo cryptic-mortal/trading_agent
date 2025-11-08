@@ -1,12 +1,19 @@
 from __future__ import annotations
 
-import json
 import re
+import contextlib
+import html
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from typing import Iterable, List, Optional, Tuple
+from urllib.error import URLError
+from urllib.parse import quote_plus
+from urllib.request import urlopen
 
-from tradingagents.dataflows.interface import route_to_vendor
+import xml.etree.ElementTree as ET
+
+import yfinance as yf
 
 _POSITIVE_TERMS = {
     "beat",
@@ -127,8 +134,7 @@ class NewsWeightReviewAgent:
         as_of_date = self._resolve_date(as_of)
         start_date = as_of_date - timedelta(days=lookback_days)
 
-        raw_news = self._fetch_news(clean_ticker, start_date, as_of_date)
-        articles = self._parse_news_payload(raw_news)
+        articles = self._fetch_news(clean_ticker, start_date, as_of_date)
         articles = self._score_articles(articles)
         articles = articles[:max_articles]
 
@@ -154,90 +160,109 @@ class NewsWeightReviewAgent:
         except ValueError as exc:
             raise ValueError("as_of must be in YYYY-MM-DD format") from exc
 
-    def _fetch_news(self, ticker: str, start_date: date, end_date: date) -> Any:
-        return route_to_vendor(
-            "get_news",
-            ticker,
-            start_date.isoformat(),
-            end_date.isoformat(),
+    def _fetch_news(self, ticker: str, start_date: date, end_date: date) -> List[NewsArticle]:
+        primary = self._fetch_google_news(ticker, start_date, end_date)
+        if primary:
+            return primary
+        return self._fetch_yfinance_news(ticker, start_date, end_date)
+
+    def _fetch_google_news(self, ticker: str, start_date: date, end_date: date) -> List[NewsArticle]:
+        query = quote_plus(f"{ticker} stock")
+        url = (
+            "https://news.google.com/rss/search?q="
+            f"{query}&hl=en-US&gl=US&ceid=US:en"
         )
 
-    def _parse_news_payload(self, payload: Any) -> List[NewsArticle]:
-        if payload is None:
+        try:
+            with contextlib.closing(urlopen(url, timeout=10)) as response:
+                payload = response.read()
+        except URLError:
+            return []
+        except TimeoutError:
             return []
 
-        if isinstance(payload, str):
-            trimmed = payload.strip()
-            if not trimmed:
-                return []
-            if trimmed.startswith("{") or trimmed.startswith("["):
-                try:
-                    parsed = json.loads(trimmed)
-                    return self._parse_news_payload(parsed)
-                except json.JSONDecodeError:
-                    pass
-            return self._parse_unstructured_text(trimmed)
+        try:
+            root = ET.fromstring(payload)
+        except ET.ParseError:
+            return []
 
-        if isinstance(payload, list):
-            articles: List[NewsArticle] = []
-            for item in payload:
-                articles.extend(self._parse_news_payload(item))
-            return _deduplicate_articles(articles)
-
-        if isinstance(payload, dict):
-            for key in ("feed", "items", "data", "articles", "news", "results"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    raw_articles = []
-                    for entry in value:
-                        raw_articles.extend(self._parse_news_payload(entry))
-                    return _deduplicate_articles(raw_articles)
-
-            headline = _first_present(payload, ["headline", "title", "news_title", "name"])
-            summary = _first_present(payload, ["summary", "description", "content", "snippet"])
-            if headline:
-                published_at = _normalise_datetime(
-                    _first_present(payload, ["datetime", "published_at", "timestamp", "date", "time"])
-                )
-                source = _first_present(payload, ["source", "publisher", "site", "author"])
-                url = _first_present(payload, ["url", "link", "article_url"])
-                return [
-                    NewsArticle(
-                        headline=headline.strip(),
-                        published_at=published_at,
-                        summary=summary.strip() if summary else None,
-                        source=source.strip() if source else None,
-                        url=url.strip() if url else None,
-                        sentiment="neutral",
-                        sentiment_score=0,
-                    )
-                ]
-
-        return []
-
-    def _parse_unstructured_text(self, text: str) -> List[NewsArticle]:
-        blocks = re.split(r"\n\s*\n", text)
         articles: List[NewsArticle] = []
-        for block in blocks:
-            snippet = block.strip()
-            if not snippet:
+        for item in root.findall(".//item"):
+            title = (item.findtext("title") or "").strip()
+            if not title:
                 continue
-            lines = [line.strip() for line in snippet.splitlines() if line.strip()]
-            if not lines:
+
+            pub_date_raw = item.findtext("pubDate")
+            publish_dt: Optional[datetime] = None
+            if pub_date_raw:
+                try:
+                    publish_dt = parsedate_to_datetime(pub_date_raw)
+                    if publish_dt.tzinfo is None:
+                        publish_dt = publish_dt.replace(tzinfo=timezone.utc)
+                    else:
+                        publish_dt = publish_dt.astimezone(timezone.utc)
+                except (TypeError, ValueError):
+                    publish_dt = None
+            if publish_dt is None:
                 continue
-            headline = lines[0][:200]
-            summary = " ".join(lines[1:]) or None
+            if publish_dt.date() < start_date or publish_dt.date() > end_date:
+                continue
+
+            summary_raw = item.findtext("description") or ""
+            summary = _strip_html(summary_raw).strip() or None
+            source_elem = item.find("{http://news.google.com/newssources}news-source")
+            source = source_elem.text.strip() if source_elem is not None and source_elem.text else None
+            link = (item.findtext("link") or "").strip() or None
+
             articles.append(
                 NewsArticle(
-                    headline=headline,
-                    published_at=None,
-                    summary=summary,
-                    source=None,
-                    url=None,
+                    headline=html.unescape(title),
+                    published_at=publish_dt.isoformat(),
+                    summary=html.unescape(summary) if summary else None,
+                    source=source,
+                    url=link,
                     sentiment="neutral",
                     sentiment_score=0,
                 )
             )
+
+        articles.sort(key=lambda article: article.published_at or "", reverse=True)
+        return _deduplicate_articles(articles)
+
+    def _fetch_yfinance_news(self, ticker: str, start_date: date, end_date: date) -> List[NewsArticle]:
+        try:
+            payload = yf.Ticker(ticker).news or []
+        except Exception:
+            payload = []
+
+        articles: List[NewsArticle] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            published = _extract_publish_datetime(item)
+            if published is None:
+                continue
+            if published.date() < start_date or published.date() > end_date:
+                continue
+            headline = (item.get("title") or item.get("headline") or "").strip()
+            if not headline:
+                continue
+            summary = (item.get("summary") or item.get("content") or "").strip() or None
+            source = (item.get("publisher") or item.get("source") or "").strip() or None
+            url = (item.get("link") or item.get("url") or "").strip() or None
+            articles.append(
+                NewsArticle(
+                    headline=headline,
+                    published_at=published.isoformat(),
+                    summary=summary,
+                    source=source,
+                    url=url,
+                    sentiment="neutral",
+                    sentiment_score=0,
+                )
+            )
+
+        articles.sort(key=lambda article: article.published_at or "", reverse=True)
         return _deduplicate_articles(articles)
 
     def _score_articles(self, articles: List[NewsArticle]) -> List[NewsArticle]:
@@ -353,46 +378,53 @@ def _score_text(text: str) -> Tuple[str, int]:
     return "neutral", 0
 
 
-def _first_present(payload: Dict[str, Any], keys: List[str]) -> Optional[str]:
-    for key in keys:
-        value = payload.get(key)
-        if value is None:
+def _extract_publish_datetime(item: dict) -> Optional[datetime]:
+    raw = item.get("providerPublishTime")
+    if raw is not None:
+        try:
+            return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (OSError, OverflowError, TypeError, ValueError):
+            pass
+
+    for key in ("pubDate", "publishedAt", "date", "time"):
+        raw_value = item.get(key)
+        if raw_value is None:
             continue
-        if isinstance(value, (int, float)):
-            return str(value)
-        if isinstance(value, str) and value.strip():
-            return value
+        if isinstance(raw_value, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(raw_value), tz=timezone.utc)
+            except (OSError, OverflowError, ValueError):
+                continue
+        if isinstance(raw_value, str):
+            candidate = raw_value.strip()
+            if not candidate:
+                continue
+            if candidate.isdigit():
+                try:
+                    return datetime.fromtimestamp(int(candidate), tz=timezone.utc)
+                except (OSError, OverflowError, ValueError):
+                    continue
+            try:
+                return datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+            except ValueError:
+                continue
     return None
 
 
-def _normalise_datetime(raw: Optional[str]) -> Optional[str]:
-    if raw is None:
-        return None
-    raw = raw.strip()
-    if not raw:
-        return None
-    try:
-        # Handle integer timestamps passed as strings
-        if raw.isdigit():
-            ts = int(raw)
-            # Many vendors return seconds since epoch
-            return datetime.utcfromtimestamp(ts).isoformat()
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return parsed.isoformat()
-    except ValueError:
-        return raw
+def _strip_html(value: str) -> str:
+    return re.sub(r"<[^>]+>", "", value)
 
 
 def _deduplicate_articles(articles: List[NewsArticle]) -> List[NewsArticle]:
-    seen = set()
-    unique: List[NewsArticle] = []
+    seen: set[str] = set()
+    deduped: List[NewsArticle] = []
     for article in articles:
         key = article.headline.lower().strip()
-        if key in seen:
+        if not key or key in seen:
             continue
         seen.add(key)
-        unique.append(article)
-    return unique
+        deduped.append(article)
+    return deduped
 
 
 def _format_articles_table(articles: List[NewsArticle]) -> str:
